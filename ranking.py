@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 """calculates chess tables"""
-# pylint disable=C0103
+
+import sys
 import datetime
-# import matplotlib as mpl
+import argparse
+
 import matplotlib.pyplot as plt
 import numpy as np
 
 NAMEFILE = "names.txt"
 GAMESFILE = "games.txt"
 
-GLICKO = True                   # use glicko system or not
+GLICKO = True                   # use glicko system or not, overwritten by
+                                # cmd argument
 
 STARTING_ELO = 1500
 DEFAULT_K_FACTOR = 20           # only applies for non-glicko: K*E(s)=elodelta
 ELO_DIFF = 400                  # rating diff of 2 people at which E(s)=1/11
 
 STARTING_RD = 350
-APPROX_RD = 50                  # mean RD of frequent players estimate
-UNCERT_TIME = 5                 # time perdiods after which RD -> STARTING_RD
+APPROX_RD = 60                  # mean RD of frequent players estimate
+UNCERT_TIME = 10                # time perdiods after which RD -> STARTING_RD
 MIN_RD = 50                     # minimum RD
 
-PENALTY = 0.005                 # penalty per inactive day as fraction of
+PENALTY = 0.00                  # penalty per inactive day as fraction of
                                 # (elo - PENALTY_CUTOFF)
-EXP_PENALTY = 0.1               # effective penalty =
-                                # exp(EXP_PENALTY * (inactive periods-1))
+EXP_PENALTY = 0.2               # effective penalty =
+                                # PENALTY*exp(EXP_PENALTY*(inactive periods-1))
 MAX_PENALTY = 20
 PENALTY_CUTOFF = STARTING_ELO * 0.75
                                 # below this, you don't get penalty
@@ -36,7 +39,11 @@ GLICKO_Q = np.log(10)/ELO_DIFF
 __dates__ = []                  # list of playing dates for determining RD
 
 def main():
+    # pylint: disable=global-statement
     """main stuff"""
+    global GLICKO
+    GLICKO = parse_args(sys.argv[1:])
+    print(GLICKO)
     names = read_playernames(NAMEFILE)
     players = []
     for name in names:
@@ -46,25 +53,69 @@ def main():
     league = League(players)
     Game.league = league
     games = read_gamestxt(GAMESFILE)
-    for date in __dates__:
+    whitewin = 0
+    blackwin = 0
+    remis = 0
+    for gameday, date in enumerate(__dates__):
         period_games = [game for game in games if game.date == date]
         for game in period_games:
             game.play()
+            if game.winner_id == 0:
+                whitewin += 1
+            elif game.winner_id == 1:
+                blackwin += 1
+            else:
+                remis += 1
         for player in league.players:
             player.calculate_period(date)
         for player in league.players:
             player.apply_period()
-    print("\n" + "-"*51)
-    print("{:^12} {:>12} {:>12} {:>12}".format("Player", "Elo", "RD", "Days"))
+        print("\n" + "-"*51)
+        datestring = date.strftime("%A, %d. %B %Y:")
+        print("  Day {}, {:30} {} games\n"
+              "".format(gameday, datestring, len(period_games)))
+        if GLICKO:
+            print("{:^12} {:>12} {:>12} {:>12}"
+                  "".format("Player", "Elo", "RD", "Days"))
+        else:
+            print("{:^16} {:>12}     {:>16}"
+                  "".format("Player", "Elo", "Days"))
+        print("-"*51)
+        league.show_table()
+        print("-"*51)
+
+    total = blackwin + whitewin + remis
     print("-"*51)
-    league.show_table()
-    print("-"*51)
+    print("{:.2f}% white winning \n{:.2f}% black winning \n{:.2f}% remis in\n"
+          "{:d} games"
+          "".format(whitewin / total * 100, blackwin / total * 100,
+                    remis / total * 100, total))
 
     for player in league.players:
-        plt.plot(player.elo, label=player.fullname)
-    plt.legend()
-    plt.show()
+        plt.plot(player.elo,
+                 label=("{:.0f} ({:+.0f}): {}"
+                        "".format(player.elo[-1],
+                                  player.elo[-1] - player.elo[-2],
+                                  player.name)))
 
+    #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+    plt.legend()
+    plt.savefig("ratingsplot.png", bbox_inches="tight", dpi=200)
+    # plt.show()
+
+
+def parse_args(arglist):
+    """Checks for command line argument GLICKO mode on or off."""
+    parser = argparse.ArgumentParser(description="Schachtabelle")
+    parser.add_argument("-g", "--glicko", action="store_true",
+                        help="use glicko system")
+    parser.add_argument("-p", "--plot", action="store_true",
+                        help="plot results")
+    args = parser.parse_args(arglist)
+    for key, value in vars(args).items():
+        if key == "glicko":
+            return value
+    return False
 
 def read_gamestxt(fname):
     """read file with game results, format:
@@ -78,7 +129,9 @@ def read_gamestxt(fname):
         dates = []
         date = (1970, 1, 1)
         for line in file:
-            if line[0] == "2":
+            if line[0] == "#":
+                continue
+            elif line[0] == "2":
                 date = (int(line[0:4]), int(line[4:6]), int(line[6:8]))
             elif len(line.split()) == 4:
                 player1 = line.split()[0]
@@ -125,8 +178,8 @@ class Player:
         self.elo = [elo]
         self.rdev = [rdev]
         self.k_factor = DEFAULT_K_FACTOR
-        self.elo_buffer = None
-        self.rdev_buffer = None
+        self.buffer = [None, None]
+        # self.rdev_buffer = None
 
     def expected(self, other):
         """expected result against other player"""
@@ -153,24 +206,24 @@ class Player:
     def calculate_period(self, now):
         """calculates new RD"""
         if not self.games:
-            self.rdev_buffer = self.rdev[-1]
-            self.elo_buffer = (self.elo[-1]
-                               - max(self.elo[-1] - PENALTY_CUTOFF, 0)
-                               * PENALTY)
+            self.buffer[1] = self.rdev[-1]
+            self.buffer[0] = (self.elo[-1]
+                              - max(self.elo[-1] - PENALTY_CUTOFF, 0)
+                              * PENALTY)
         elif not self.games[-1].date == now:
             non_played_periods = periods(now, self.games)
             rdev = min(np.sqrt(self.rdev[-1] ** 2
                                + GLICKO_C * non_played_periods),
                        STARTING_RD)
             if GLICKO:
-                self.rdev_buffer = rdev
+                self.buffer[1] = rdev
             else:
-                self.rdev_buffer = 0
-            self.elo_buffer = (self.elo[-1]
-                               - max(self.elo[-1] - PENALTY_CUTOFF, 0)
-                               * PENALTY
-                               * np.exp(EXP_PENALTY
-                                        * (non_played_periods - 1)))
+                self.buffer[1] = 0
+            self.buffer[0] = (self.elo[-1]
+                              - max(self.elo[-1] - PENALTY_CUTOFF, 0)
+                              * PENALTY
+                              * np.exp(EXP_PENALTY
+                                       * (non_played_periods - 1)))
         else:
             last_games = [game for game in self.games if game.date == now]
             d_comps = []
@@ -185,18 +238,18 @@ class Player:
                 r_comps.append(other.g_weight() * (win_value - expected))
             d2_weight = (GLICKO_Q ** 2 * sum(d_comps)) ** -1
             if GLICKO:
-                self.rdev_buffer = max(np.sqrt(1 / self.rdev[-1] ** 2
-                                               + 1 / d2_weight
-                                              ) ** -1,
-                                       MIN_RD)
-                self.elo_buffer = (self.elo[-1]
-                                   + GLICKO_Q
-                                   * self.rdev_buffer ** 2
-                                   * sum(r_comps)
-                                   + BONUS)
+                self.buffer[1] = max(np.sqrt(1 / self.rdev[-1] ** 2
+                                             + 1 / d2_weight
+                                            ) ** -1,
+                                     MIN_RD)
+                self.buffer[0] = (self.elo[-1]
+                                  + GLICKO_Q
+                                  * self.buffer[1] ** 2
+                                  * sum(r_comps)
+                                  + BONUS)
             else:
-                self.rdev_buffer = 0
-                self.elo_buffer = self.elo[-1] + sum(r_comps) * self.k_factor
+                self.buffer[1] = 0
+                self.buffer[0] = self.elo[-1] + sum(r_comps) * self.k_factor
             # if self.name == "ME":
             #     print(r_comps)
             #     print(GLICKO_Q * self.rdev_buffer ** 2)
@@ -207,17 +260,25 @@ class Player:
 
     def apply_period(self):
         """stores new rdev and elo"""
-        self.rdev.append(self.rdev_buffer)
-        self.elo.append(self.elo_buffer)
+        self.rdev.append(self.buffer[1])
+        self.elo.append(self.buffer[0])
 
     def show_stats(self):
         """show a string for the league table"""
         gamedays = len(set([game.date for game in self.games]))
-        statstring = ("{:^12} {:>12.0f} {:>12.0f} {:>12d}"
-                      "".format(self.fullname,
-                                self.elo[-1],
-                                self.rdev[-1],
-                                gamedays))
+        elostring = " {:.0f} ({:+.0f})".format(self.elo[-1],
+                                               self.elo[-1] - self.elo[-2])
+        if GLICKO:
+            statstring = ("{:^12} {:12} {:>12.0f} {:>12d}"
+                          "".format(self.fullname,
+                                    elostring,
+                                    self.rdev[-1],
+                                    gamedays))
+        else:
+            statstring = ("{:^16}      {:16} {:>11d}"
+                          "".format(self.fullname,
+                                    elostring,
+                                    gamedays))
         return statstring
 
 

@@ -2,6 +2,7 @@
 """calculates chess tables"""
 
 import sys
+import os
 import datetime
 import argparse
 
@@ -155,11 +156,21 @@ def read_playernames(fname):
     shortname   longname
     shortname2  longname2"""
     names = {}
-    with open(fname) as file:
-        for line in file:
-            sname = line.split()[0]
-            lname = line.split()[1]
-            names[sname] = lname
+    if os.path.isfile(fname):
+        with open(fname) as file:
+            for line in file:
+                sname = line.split()[0]
+                lname = " ".join(line.split()[1:])
+                names[sname] = lname
+    else:
+        with open(GAMESFILE) as file:
+            for line in file:
+                name1 = line.split()[0]
+                name2 = line.split()[0]
+                if name1 not in names:
+                    names[name1] = name1
+                if name2 not in names:
+                    names[name2] = name2
     return names
 
 

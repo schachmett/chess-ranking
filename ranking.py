@@ -91,7 +91,10 @@ def main():
           "".format(whitewin / total * 100, blackwin / total * 100,
                     remis / total * 100, total))
 
-    for player in league.players:
+    sorted_players = sorted(league.players,
+                            key=lambda x: x.elo[-1],
+                            reverse=True)
+    for player in sorted_players:
         plt.plot(player.elo,
                  label=("{:.0f} ({:+.0f}): {}"
                         "".format(player.elo[-1],
